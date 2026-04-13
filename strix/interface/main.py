@@ -13,6 +13,7 @@ from typing import Any
 
 import litellm
 from docker.errors import DockerException
+from litellm import stream_chunk_builder
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -32,6 +33,7 @@ from strix.interface.utils import (  # noqa: E402
     check_docker_connection,
     clone_repository,
     collect_local_sources,
+    extract_streamed_llm_text,
     generate_run_name,
     image_exists,
     infer_target_type,
@@ -205,6 +207,9 @@ def check_docker_installed() -> None:
 
 async def warm_up_llm() -> None:
     console = Console()
+    model_name: str | None = None
+    litellm_model: str | None = None
+    api_base: str | None = None
 
     try:
         model_name, api_key, api_base = resolve_llm_config()
@@ -222,15 +227,19 @@ async def warm_up_llm() -> None:
             "model": litellm_model,
             "messages": test_messages,
             "timeout": llm_timeout,
+            "stream": True,
         }
         if api_key:
             completion_kwargs["api_key"] = api_key
         if api_base:
             completion_kwargs["api_base"] = api_base
 
-        response = litellm.completion(**completion_kwargs)
-
-        validate_llm_response(response)
+        stream = litellm.completion(**completion_kwargs)
+        chunks = list(stream)
+        streamed_text = extract_streamed_llm_text(chunks)
+        if not streamed_text.strip():
+            response = stream_chunk_builder(chunks) if chunks else None
+            validate_llm_response(response)
 
     except Exception as e:  # noqa: BLE001
         error_text = Text()
@@ -238,6 +247,9 @@ async def warm_up_llm() -> None:
         error_text.append("\n\n", style="white")
         error_text.append("Could not establish connection to the language model.\n", style="white")
         error_text.append("Please check your configuration and try again.\n", style="white")
+        error_text.append(f"\nModel: {litellm_model or model_name or 'unknown'}", style="dim white")
+        if api_base:
+            error_text.append(f"\nAPI Base: {api_base}", style="dim white")
         error_text.append(f"\nError: {e}", style="dim white")
 
         panel = Panel(

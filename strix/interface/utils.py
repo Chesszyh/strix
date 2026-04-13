@@ -1424,9 +1424,89 @@ def process_pull_line(
 
 
 # LLM utilities
+def _llm_content_state(content: Any) -> str:
+    if content is None:
+        return "empty"
+    if isinstance(content, str):
+        return "present" if content.strip() else "empty"
+    if isinstance(content, list):
+        for item in content:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "text"
+                and item.get("text", "").strip()
+            ):
+                return "present"
+        return "empty"
+    return "present"
+
+
+def describe_llm_response(response: Any) -> str:
+    if not response:
+        return "response=missing"
+
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return "choices=0"
+
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    if message is None:
+        return "choices=1, message=missing"
+
+    content = getattr(message, "content", None)
+    tool_calls = getattr(message, "tool_calls", None)
+    reasoning_content = getattr(message, "reasoning_content", None)
+    finish_reason = getattr(choice, "finish_reason", None) or "missing"
+
+    return (
+        f"choices={len(choices)}, "
+        f"content={_llm_content_state(content)}, "
+        f"tool_calls={'present' if tool_calls else 'empty'}, "
+        f"reasoning_content={_llm_content_state(reasoning_content)}, "
+        f"finish_reason={finish_reason}"
+    )
+
+
+def extract_streamed_llm_text(chunks: list[Any]) -> str:
+    parts: list[str] = []
+
+    for chunk in chunks:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            continue
+
+        content = getattr(delta, "content", None)
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+
+    return "".join(parts)
+
+
 def validate_llm_response(response: Any) -> None:
-    if not response or not response.choices or not response.choices[0].message.content:
-        raise RuntimeError("Invalid response from LLM")
+    if not response:
+        raise RuntimeError("Invalid response from LLM (response=missing)")
+
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        raise RuntimeError("Invalid response from LLM (choices=0)")
+
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        raise RuntimeError("Invalid response from LLM (choices=1, message=missing)")
+
+    if _llm_content_state(getattr(message, "content", None)) != "present":
+        raise RuntimeError(f"Invalid response from LLM ({describe_llm_response(response)})")
 
 
 def validate_config_file(config_path: str) -> Path:
