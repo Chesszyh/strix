@@ -19,6 +19,7 @@ from strix.runtime import SandboxInitializationError
 from strix.tools import process_tool_invocations
 from strix.utils.resource_paths import get_strix_resource_path
 
+from .checkpoint import CheckpointManager
 from .state import AgentState
 
 
@@ -72,6 +73,7 @@ class BaseAgent(metaclass=AgentMeta):
                 agent_name="Root Agent",
                 max_iterations=self.max_iterations,
             )
+        self._checkpoint_interval = self._get_checkpoint_interval()
 
         self.interactive = getattr(self.llm_config, "interactive", False)
         if self.interactive and self.state.parent_id is None:
@@ -116,6 +118,35 @@ class BaseAgent(metaclass=AgentMeta):
 
         self._add_to_agents_graph()
 
+    @staticmethod
+    def _get_checkpoint_interval() -> int:
+        from strix.config import Config
+
+        raw_value = Config.get("strix_checkpoint_interval") or "1"
+        try:
+            return max(1, int(raw_value))
+        except (TypeError, ValueError):
+            return 1
+
+    def _checkpoint(self, reason: str) -> None:
+        if self.state.parent_id is not None:
+            return
+
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if not tracer or not tracer.run_name:
+            return
+
+        try:
+            CheckpointManager(tracer.run_name).save(
+                root_state=self.state,
+                scan_config=tracer.scan_config or {},
+                metadata={"reason": reason, "iteration": self.state.iteration},
+            )
+        except (OSError, TypeError, ValueError):
+            logger.exception("Failed to save checkpoint")
+
     def _add_to_agents_graph(self) -> None:
         from strix.tools.agents_graph import agents_graph_actions
 
@@ -130,7 +161,7 @@ class BaseAgent(metaclass=AgentMeta):
             "result": None,
             "llm_config": self.llm_config_name,
             "agent_type": self.__class__.__name__,
-            "state": self.state.model_dump(),
+            "state": self.state.get_execution_summary(),
         }
         agents_graph_actions._agent_graph["nodes"][self.state.agent_id] = node
 
@@ -215,6 +246,8 @@ class BaseAgent(metaclass=AgentMeta):
                 self._current_task = iteration_task
                 should_finish = await iteration_task
                 self._current_task = None
+                if self.state.iteration % self._checkpoint_interval == 0:
+                    self._checkpoint("iteration")
 
                 if should_finish is None and self.interactive:
                     await self._enter_waiting_state(tracer, text_response=True)
@@ -363,7 +396,9 @@ class BaseAgent(metaclass=AgentMeta):
         if not self.state.task:
             self.state.task = task
 
-        self.state.add_message("user", task)
+        if not self.state.messages:
+            self.state.add_message("user", task)
+        self._checkpoint("initialized")
 
     async def _process_iteration(self, tracer: Optional["Tracer"]) -> bool | None:
         final_response = None
@@ -434,6 +469,7 @@ class BaseAgent(metaclass=AgentMeta):
             raise
 
         self.state.messages = conversation_history
+        self._checkpoint("tool_execution")
 
         if should_agent_finish:
             self.state.set_completed({"success": True})

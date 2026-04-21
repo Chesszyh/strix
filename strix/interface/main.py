@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from strix.agents.checkpoint import load_checkpoint
 from strix.config import Config, apply_saved_config, save_current_config
 from strix.config.config import resolve_llm_config
 from strix.llm.utils import resolve_strix_model
@@ -309,10 +310,18 @@ Examples:
         "-t",
         "--target",
         type=str,
-        required=True,
         action="append",
         help="Target to test (URL, repository, local directory path, domain name, or IP address). "
         "Can be specified multiple times for multi-target scans.",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        help=(
+            "Resume a saved scan checkpoint by run name or checkpoint path. "
+            "Use '--resume' without a value to resume the latest checkpoint."
+        ),
     )
     parser.add_argument(
         "--instruction",
@@ -388,6 +397,9 @@ Examples:
 
     args = parser.parse_args()
 
+    if not args.target and not args.resume:
+        parser.error("one of --target/-t or --resume is required")
+
     if args.instruction and args.instruction_file:
         parser.error(
             "Cannot specify both --instruction and --instruction-file. Use one or the other."
@@ -404,7 +416,7 @@ Examples:
             parser.error(f"Failed to read instruction file '{instruction_path}': {e}")
 
     args.targets_info = []
-    for target in args.target:
+    for target in args.target or []:
         try:
             target_type, target_dict = infer_target_type(target)
 
@@ -423,6 +435,43 @@ Examples:
     rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
 
     return args
+
+
+def apply_resume_checkpoint(args: argparse.Namespace) -> None:
+    if not args.resume:
+        args.resume_checkpoint = None
+        return
+
+    try:
+        checkpoint = load_checkpoint(args.resume)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        console = Console()
+        error_text = Text()
+        error_text.append("CHECKPOINT RESUME FAILED", style="bold red")
+        error_text.append("\n\n", style="white")
+        error_text.append(str(e), style="white")
+
+        panel = Panel(
+            error_text,
+            title="[bold white]STRIX",
+            title_align="left",
+            border_style="red",
+            padding=(1, 2),
+        )
+        console.print("\n")
+        console.print(panel)
+        console.print()
+        sys.exit(1)
+
+    scan_config = checkpoint.get("scan_config", {})
+    if not args.targets_info:
+        args.targets_info = scan_config.get("targets", []) or []
+        assign_workspace_subdirs(args.targets_info)
+        rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
+    if not args.instruction:
+        args.instruction = scan_config.get("user_instructions", "")
+    args.run_name = checkpoint.get("run_name") or scan_config.get("run_name")
+    args.resume_checkpoint = checkpoint
 
 
 def display_completion_message(args: argparse.Namespace, results_path: Path) -> None:
@@ -546,6 +595,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     if args.config:
         apply_config_override(args.config)
 
+    apply_resume_checkpoint(args)
+
     check_docker_installed()
     pull_docker_image()
 
@@ -554,48 +605,54 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     persist_config()
 
-    args.run_name = generate_run_name(args.targets_info)
+    if not getattr(args, "run_name", None):
+        args.run_name = generate_run_name(args.targets_info)
 
     for target_info in args.targets_info:
         if target_info["type"] == "repository":
             repo_url = target_info["details"]["target_repo"]
             dest_name = target_info["details"].get("workspace_subdir")
-            cloned_path = clone_repository(repo_url, args.run_name, dest_name)
-            target_info["details"]["cloned_repo_path"] = cloned_path
+            if not target_info["details"].get("cloned_repo_path"):
+                cloned_path = clone_repository(repo_url, args.run_name, dest_name)
+                target_info["details"]["cloned_repo_path"] = cloned_path
 
     args.local_sources = collect_local_sources(args.targets_info)
-    try:
-        diff_scope = resolve_diff_scope_context(
-            local_sources=args.local_sources,
-            scope_mode=args.scope_mode,
-            diff_base=args.diff_base,
-            non_interactive=args.non_interactive,
-        )
-    except ValueError as e:
-        console = Console()
-        error_text = Text()
-        error_text.append("DIFF SCOPE RESOLUTION FAILED", style="bold red")
-        error_text.append("\n\n", style="white")
-        error_text.append(str(e), style="white")
+    if getattr(args, "resume_checkpoint", None) and not args.target:
+        scan_config = args.resume_checkpoint.get("scan_config", {})
+        args.diff_scope = scan_config.get("diff_scope", {"active": False})
+    else:
+        try:
+            diff_scope = resolve_diff_scope_context(
+                local_sources=args.local_sources,
+                scope_mode=args.scope_mode,
+                diff_base=args.diff_base,
+                non_interactive=args.non_interactive,
+            )
+        except ValueError as e:
+            console = Console()
+            error_text = Text()
+            error_text.append("DIFF SCOPE RESOLUTION FAILED", style="bold red")
+            error_text.append("\n\n", style="white")
+            error_text.append(str(e), style="white")
 
-        panel = Panel(
-            error_text,
-            title="[bold white]STRIX",
-            title_align="left",
-            border_style="red",
-            padding=(1, 2),
-        )
-        console.print("\n")
-        console.print(panel)
-        console.print()
-        sys.exit(1)
+            panel = Panel(
+                error_text,
+                title="[bold white]STRIX",
+                title_align="left",
+                border_style="red",
+                padding=(1, 2),
+            )
+            console.print("\n")
+            console.print(panel)
+            console.print()
+            sys.exit(1)
 
-    args.diff_scope = diff_scope.metadata
-    if diff_scope.instruction_block:
-        if args.instruction:
-            args.instruction = f"{diff_scope.instruction_block}\n\n{args.instruction}"
-        else:
-            args.instruction = diff_scope.instruction_block
+        args.diff_scope = diff_scope.metadata
+        if diff_scope.instruction_block:
+            if args.instruction:
+                args.instruction = f"{diff_scope.instruction_block}\n\n{args.instruction}"
+            else:
+                args.instruction = diff_scope.instruction_block
 
     is_whitebox = bool(args.local_sources)
 

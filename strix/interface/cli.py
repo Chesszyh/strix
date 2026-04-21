@@ -10,6 +10,8 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from strix.agents.checkpoint import restore_root_state
+from strix.agents.limits import resolve_max_iterations
 from strix.agents.StrixAgent import StrixAgent
 from strix.llm.config import LLMConfig
 from strix.telemetry.tracer import Tracer, set_global_tracer
@@ -81,8 +83,10 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     )
     agent_config = {
         "llm_config": llm_config,
-        "max_iterations": 300,
+        "max_iterations": resolve_max_iterations(scan_mode),
     }
+    if getattr(args, "resume_checkpoint", None):
+        agent_config["state"] = restore_root_state(args.resume_checkpoint)
 
     if getattr(args, "local_sources", None):
         agent_config["local_sources"] = args.local_sources
