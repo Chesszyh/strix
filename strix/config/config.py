@@ -21,6 +21,9 @@ class Config:
     strix_reasoning_effort = "high"
     strix_llm_max_retries = "5"
     strix_memory_compressor_timeout = "30"
+    strix_context_max_tokens = "32000"
+    strix_context_recent_messages = "8"
+    strix_context_summary_chunk_messages = "10"
     llm_timeout = "300"
     _LLM_CANONICAL_NAMES = (
         "strix_llm",
@@ -32,12 +35,23 @@ class Config:
         "strix_reasoning_effort",
         "strix_llm_max_retries",
         "strix_memory_compressor_timeout",
+        "strix_context_max_tokens",
+        "strix_context_recent_messages",
+        "strix_context_summary_chunk_messages",
         "llm_timeout",
     )
 
     # Tool & Feature Configuration
     perplexity_api_key = None
     strix_disable_browser = "false"
+    strix_tool_result_max_chars = "6000"
+    strix_agent_inherit_recent_messages = "6"
+    strix_agent_inherit_max_chars = "2000"
+    strix_max_iterations = None
+    strix_child_max_iterations = None
+    strix_checkpoint_enabled = "true"
+    strix_checkpoint_interval = "1"
+    strix_trace_memory_events = "800"
 
     # Runtime Configuration
     strix_image = "ghcr.io/usestrix/strix-sandbox:0.1.13"

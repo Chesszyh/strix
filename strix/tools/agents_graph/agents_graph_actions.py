@@ -1,8 +1,9 @@
+import re
 import threading
 from datetime import UTC, datetime
-import re
 from typing import Any, Literal
 
+from strix.config import Config
 from strix.tools.registry import register_tool
 
 
@@ -37,6 +38,96 @@ _completed_agent_llm_totals: dict[str, int | float] = _empty_llm_stats_totals()
 _agent_states: dict[str, Any] = {}
 
 
+def _int_config(name: str, default: int, minimum: int = 1) -> int:
+    raw_value = Config.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def _compact_message_content(content: Any, max_chars: int) -> Any:
+    suffix = "\n...[truncated inherited parent context]"
+    if isinstance(content, str):
+        return content if len(content) <= max_chars else content[:max_chars] + suffix
+    if isinstance(content, list):
+        compacted = []
+        remaining = max_chars
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                text = str(item.get("text", ""))
+                if remaining <= 0:
+                    break
+                clipped = text[:remaining]
+                compacted.append({"type": "text", "text": clipped})
+                remaining -= len(clipped)
+            elif item.get("type") == "image_url":
+                compacted.append(
+                    {"type": "text", "text": "[Image omitted from inherited context]"}
+                )
+        return compacted
+    text = str(content)
+    return text if len(text) <= max_chars else text[:max_chars] + suffix
+
+
+def _select_inherited_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recent_count = _int_config("strix_agent_inherit_recent_messages", 6)
+    max_chars = _int_config("strix_agent_inherit_max_chars", 2000)
+
+    if not messages:
+        return []
+
+    recent_messages = messages[-recent_count:]
+    inherited: list[dict[str, Any]] = []
+    omitted_count = max(0, len(messages) - len(recent_messages))
+    if omitted_count:
+        inherited.append(
+            {
+                "role": "user",
+                "content": (
+                    f'<parent_context_summary omitted_messages="{omitted_count}">'
+                    "Earlier parent conversation was omitted to avoid duplicating large "
+                    "histories in child agents. Use shared notes/wiki, artifacts, or ask "
+                    "the parent if older context is needed."
+                    "</parent_context_summary>"
+                ),
+            }
+        )
+
+    inherited.extend(
+        {
+            "role": msg.get("role", "user"),
+            "content": _compact_message_content(msg.get("content", ""), max_chars),
+        }
+        for msg in recent_messages
+    )
+
+    return inherited
+
+
+def _state_summary(agent_state: Any) -> dict[str, Any]:
+    if hasattr(agent_state, "get_execution_summary"):
+        summary = agent_state.get_execution_summary()
+    elif hasattr(agent_state, "model_dump"):
+        summary = agent_state.model_dump()
+    else:
+        summary = dict(getattr(agent_state, "__dict__", {}) or {})
+
+    for key in ("messages", "actions_taken", "observations", "context"):
+        summary.pop(key, None)
+
+    messages = getattr(agent_state, "messages", None)
+    if isinstance(messages, list):
+        summary["message_count"] = len(messages)
+
+    return summary
+
+
 def _snapshot_agent_llm_stats(agent: Any) -> dict[str, int | float] | None:
     if not hasattr(agent, "llm") or not hasattr(agent.llm, "_total_stats"):
         return None
@@ -66,6 +157,8 @@ def _finalize_agent_llm_stats(agent_id: str, agent: Any) -> None:
                 node["llm_stats"] = stats
 
         _agent_instances.pop(agent_id, None)
+        _agent_states.pop(agent_id, None)
+        _agent_messages.pop(agent_id, None)
 
 
 def _is_whitebox_agent(agent_id: str) -> bool:
@@ -267,7 +360,7 @@ def _run_agent_in_thread(
 
         _agent_states[state.agent_id] = state
 
-        _agent_graph["nodes"][state.agent_id]["state"] = state.model_dump()
+        _agent_graph["nodes"][state.agent_id]["state"] = _state_summary(state)
 
         import asyncio
 
@@ -403,6 +496,7 @@ def create_agent(
             }
 
         from strix.agents import StrixAgent
+        from strix.agents.limits import resolve_max_iterations
         from strix.agents.state import AgentState
         from strix.llm.config import LLMConfig
 
@@ -442,7 +536,7 @@ def create_agent(
             task=task,
             agent_name=name,
             parent_id=parent_id,
-            max_iterations=300,
+            max_iterations=resolve_max_iterations(scan_mode, child=True),
             waiting_timeout=300 if interactive else 600,
         )
         llm_config = LLMConfig(
@@ -462,7 +556,7 @@ def create_agent(
 
         inherited_messages = []
         if inherit_context:
-            inherited_messages = agent_state.get_conversation_history()
+            inherited_messages = _select_inherited_messages(agent_state.get_conversation_history())
 
         with _agent_llm_stats_lock:
             _agent_instances[state.agent_id] = agent

@@ -81,6 +81,7 @@ class Tracer:
         self._run_completed_emitted = False
         self._telemetry_enabled = is_otel_enabled()
         self._sanitizer = TelemetrySanitizer()
+        self._trace_memory_events = self._get_trace_memory_events()
 
         self._otel_tracer: Any = None
         self._remote_export_enabled = False
@@ -90,6 +91,14 @@ class Tracer:
 
         self._setup_telemetry()
         self._emit_run_started_event()
+
+    @staticmethod
+    def _get_trace_memory_events() -> int:
+        raw_value = Config.get("strix_trace_memory_events") or "800"
+        try:
+            return max(100, int(raw_value))
+        except (TypeError, ValueError):
+            return 800
 
     @property
     def events_file_path(self) -> Path:
@@ -474,6 +483,7 @@ class Tracer:
         }
 
         self.chat_messages.append(message_data)
+        self._trim_chat_messages()
         self._emit_event(
             "chat.message",
             actor={"agent_id": agent_id, "role": role},
@@ -482,6 +492,11 @@ class Tracer:
             source="strix.chat",
         )
         return message_id
+
+    def _trim_chat_messages(self) -> None:
+        if len(self.chat_messages) <= self._trace_memory_events:
+            return
+        self.chat_messages = self.chat_messages[-self._trace_memory_events :]
 
     def log_tool_execution_start(
         self,
@@ -506,6 +521,7 @@ class Tracer:
         }
 
         self.tool_executions[execution_id] = execution_data
+        self._trim_tool_executions()
 
         if agent_id in self.agents:
             self.agents[agent_id]["tool_executions"].append(execution_id)
@@ -523,6 +539,22 @@ class Tracer:
         )
 
         return execution_id
+
+    def _trim_tool_executions(self) -> None:
+        if len(self.tool_executions) <= self._trace_memory_events:
+            return
+
+        keep_ids = set(sorted(self.tool_executions)[-self._trace_memory_events :])
+        for exec_id in list(self.tool_executions):
+            if exec_id not in keep_ids:
+                self.tool_executions.pop(exec_id, None)
+
+        for agent_data in self.agents.values():
+            tool_ids = agent_data.get("tool_executions")
+            if isinstance(tool_ids, list):
+                agent_data["tool_executions"] = [
+                    exec_id for exec_id in tool_ids if exec_id in keep_ids
+                ]
 
     def update_tool_execution(
         self,
@@ -801,8 +833,8 @@ class Tracer:
     def get_total_llm_stats(self) -> dict[str, Any]:
         from strix.tools.agents_graph.agents_graph_actions import (
             _agent_instances,
-            _completed_agent_llm_totals,
             _agent_llm_stats_lock,
+            _completed_agent_llm_totals,
         )
 
         with _agent_llm_stats_lock:

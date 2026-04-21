@@ -172,14 +172,19 @@ class LLM:
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[LLMResponse]:
         accumulated = ""
-        chunks: list[Any] = []
+        chunks_for_metadata: list[Any] = []
+        usage_source: Any | None = None
         done_streaming = 0
+        keep_chunks_for_reasoning = self._supports_reasoning()
 
         self._total_stats.requests += 1
         response = await acompletion(**self._build_completion_args(messages), stream=True)
 
         async for chunk in response:
-            chunks.append(chunk)
+            if keep_chunks_for_reasoning:
+                chunks_for_metadata.append(chunk)
+            if getattr(chunk, "usage", None):
+                usage_source = chunk
             if done_streaming:
                 done_streaming += 1
                 if getattr(chunk, "usage", None) or done_streaming > 5:
@@ -197,15 +202,18 @@ class LLM:
                     continue
                 yield LLMResponse(content=accumulated)
 
-        if chunks:
-            self._update_usage_stats(stream_chunk_builder(chunks))
+        if chunks_for_metadata:
+            built_response = stream_chunk_builder(chunks_for_metadata)
+            self._update_usage_stats(built_response)
+        elif usage_source is not None:
+            self._update_usage_stats(usage_source)
 
         accumulated = normalize_tool_format(accumulated)
         accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
         yield LLMResponse(
             content=accumulated,
             tool_invocations=parse_tool_invocations(accumulated),
-            thinking_blocks=self._extract_thinking(chunks),
+            thinking_blocks=self._extract_thinking(chunks_for_metadata),
         )
 
     def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
