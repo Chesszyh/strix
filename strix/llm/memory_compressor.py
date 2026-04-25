@@ -9,8 +9,9 @@ from strix.config.config import Config, resolve_llm_config
 logger = logging.getLogger(__name__)
 
 
-MAX_TOTAL_TOKENS = 100_000
-MIN_RECENT_MESSAGES = 15
+DEFAULT_MAX_TOTAL_TOKENS = 32_000
+DEFAULT_RECENT_MESSAGES = 8
+DEFAULT_SUMMARY_CHUNK_MESSAGES = 10
 
 SUMMARY_PROMPT_TEMPLATE = """You are an agent performing context
 condensation for a security agent. Your job is to compress scan data while preserving
@@ -63,6 +64,17 @@ def _get_message_tokens(msg: dict[str, Any], model: str) -> int:
             if isinstance(item, dict) and item.get("type") == "text"
         )
     return 0
+
+
+def _get_int_config(name: str, default: int, minimum: int = 1) -> int:
+    raw_value = Config.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
 
 
 def _extract_message_text(msg: dict[str, Any]) -> str:
@@ -159,6 +171,19 @@ class MemoryCompressor:
         self.max_images = max_images
         self.model_name = model_name or Config.get("strix_llm")
         self.timeout = timeout or int(Config.get("strix_memory_compressor_timeout") or "120")
+        self.max_total_tokens = _get_int_config(
+            "strix_context_max_tokens",
+            DEFAULT_MAX_TOTAL_TOKENS,
+            minimum=1,
+        )
+        self.recent_message_count = _get_int_config(
+            "strix_context_recent_messages",
+            DEFAULT_RECENT_MESSAGES,
+        )
+        self.summary_chunk_messages = _get_int_config(
+            "strix_context_summary_chunk_messages",
+            DEFAULT_SUMMARY_CHUNK_MESSAGES,
+        )
 
         if not self.model_name:
             raise ValueError("STRIX_LLM environment variable must be set and not empty")
@@ -195,8 +220,8 @@ class MemoryCompressor:
             else:
                 regular_msgs.append(msg)
 
-        recent_msgs = regular_msgs[-MIN_RECENT_MESSAGES:]
-        old_msgs = regular_msgs[:-MIN_RECENT_MESSAGES]
+        recent_msgs = regular_msgs[-self.recent_message_count :]
+        old_msgs = regular_msgs[: -self.recent_message_count]
 
         # Type assertion since we ensure model_name is not None in __init__
         model_name: str = self.model_name  # type: ignore[assignment]
@@ -205,15 +230,24 @@ class MemoryCompressor:
             _get_message_tokens(msg, model_name) for msg in system_msgs + regular_msgs
         )
 
-        if total_tokens <= MAX_TOTAL_TOKENS * 0.9:
+        if total_tokens <= self.max_total_tokens * 0.85:
             return messages
 
         compressed = []
-        chunk_size = 10
+        chunk_size = self.summary_chunk_messages
         for i in range(0, len(old_msgs), chunk_size):
             chunk = old_msgs[i : i + chunk_size]
             summary = _summarize_messages(chunk, model_name, self.timeout)
             if summary:
                 compressed.append(summary)
 
-        return system_msgs + compressed + recent_msgs
+        result = system_msgs + compressed + recent_msgs
+
+        while len(recent_msgs) > 1:
+            result_tokens = sum(_get_message_tokens(msg, model_name) for msg in result)
+            if result_tokens <= self.max_total_tokens:
+                break
+            recent_msgs = recent_msgs[1:]
+            result = system_msgs + compressed + recent_msgs
+
+        return result

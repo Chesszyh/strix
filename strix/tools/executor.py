@@ -243,9 +243,11 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
         final_result_str = f"Tool {tool_name} executed successfully"
     else:
         final_result_str = str(result_str)
-        if len(final_result_str) > 10000:
-            start_part = final_result_str[:4000]
-            end_part = final_result_str[-4000:]
+        max_chars = _get_tool_result_max_chars()
+        if len(final_result_str) > max_chars:
+            edge_chars = max(500, max_chars // 2)
+            start_part = final_result_str[:edge_chars]
+            end_part = final_result_str[-edge_chars:]
             final_result_str = start_part + "\n\n... [middle content truncated] ...\n\n" + end_part
 
     observation_xml = (
@@ -254,6 +256,32 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
     )
 
     return observation_xml, images
+
+
+def _get_tool_result_max_chars() -> int:
+    try:
+        return max(1000, int(Config.get("strix_tool_result_max_chars") or "6000"))
+    except (TypeError, ValueError):
+        return 6000
+
+
+def _compact_tracer_payload(payload: Any, max_chars: int | None = None) -> Any:
+    max_chars = max_chars or _get_tool_result_max_chars()
+    if isinstance(payload, str):
+        if len(payload) <= max_chars:
+            return payload
+        return payload[:max_chars] + f"... [truncated at {max_chars} chars]"
+    if isinstance(payload, dict):
+        compacted: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key == "screenshot" and isinstance(value, str):
+                compacted[key] = "[Image data omitted from in-memory telemetry]"
+            else:
+                compacted[key] = _compact_tracer_payload(value, max_chars)
+        return compacted
+    if isinstance(payload, list):
+        return [_compact_tracer_payload(item, max_chars) for item in payload[:100]]
+    return payload
 
 
 async def _execute_single_tool(
@@ -285,7 +313,15 @@ async def _execute_single_tool(
             elif tool_name == "agent_finish":
                 should_agent_finish = result.get("agent_completed", False)
 
-        _update_tracer_with_result(tracer, execution_id, is_error, result, error_payload)
+        tracer_result = _compact_tracer_payload(result)
+        tracer_error_payload = _compact_tracer_payload(error_payload)
+        _update_tracer_with_result(
+            tracer,
+            execution_id,
+            is_error,
+            tracer_result,
+            tracer_error_payload,
+        )
 
     except (ConnectionError, RuntimeError, ValueError, TypeError, OSError) as e:
         error_msg = str(e)

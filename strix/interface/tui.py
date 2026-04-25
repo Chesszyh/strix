@@ -28,6 +28,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
+from strix.agents.checkpoint import restore_root_state
+from strix.agents.limits import resolve_max_iterations
 from strix.agents.StrixAgent import StrixAgent
 from strix.interface.streaming_parser import parse_streaming_content
 from strix.interface.tool_components.agent_message_renderer import AgentMessageRenderer
@@ -755,8 +757,10 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
         config = {
             "llm_config": llm_config,
-            "max_iterations": 300,
+            "max_iterations": resolve_max_iterations(scan_mode),
         }
+        if getattr(args, "resume_checkpoint", None):
+            config["state"] = restore_root_state(args.resume_checkpoint)
 
         if getattr(args, "local_sources", None):
             config["local_sources"] = args.local_sources

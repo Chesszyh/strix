@@ -7,12 +7,17 @@ description: "Command-line options for Strix"
 
 ```bash
 strix --target <target> [options]
+strix --resume [run-name-or-checkpoint-path]
 ```
 
 ## Options
 
 <ParamField path="--target, -t" type="string" required>
   Target to test. Accepts URLs, repositories, local directories, domains, or IP addresses. Can be specified multiple times.
+</ParamField>
+
+<ParamField path="--resume" type="string">
+  Resume from a saved checkpoint. Pass a run name such as `app_ab12`, a path to `checkpoint.json`, or omit the value to resume the latest checkpoint.
 </ParamField>
 
 <ParamField path="--instruction" type="string">
@@ -60,6 +65,12 @@ strix -n --target ./ --scan-mode quick
 
 # Force diff-scope against a specific base ref
 strix -n --target ./ --scan-mode quick --scope-mode diff --diff-base origin/main
+
+# Resume the latest saved checkpoint
+strix --resume
+
+# Resume a specific run
+strix --resume app_ab12
 
 # Multi-target white-box testing
 strix -t https://github.com/org/app -t https://staging.example.com

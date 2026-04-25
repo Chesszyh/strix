@@ -35,6 +35,26 @@ Configure Strix using environment variables or a config file.
   Timeout in seconds for memory compression operations (context summarization).
 </ParamField>
 
+<ParamField path="STRIX_CONTEXT_MAX_TOKENS" default="32000" type="integer">
+  Soft token budget for retained conversation context before older messages are summarized.
+</ParamField>
+
+<ParamField path="STRIX_CONTEXT_RECENT_MESSAGES" default="8" type="integer">
+  Number of recent messages kept verbatim during context compression.
+</ParamField>
+
+<ParamField path="STRIX_CONTEXT_SUMMARY_CHUNK_MESSAGES" default="10" type="integer">
+  Number of older messages summarized in each compression chunk.
+</ParamField>
+
+<ParamField path="STRIX_MAX_ITERATIONS" type="integer">
+  Override the root agent iteration budget. Defaults are scan-mode based: quick `50`, standard `120`, deep `180`.
+</ParamField>
+
+<ParamField path="STRIX_CHILD_MAX_ITERATIONS" type="integer">
+  Override child agent iteration budgets. Defaults are scan-mode based: quick `30`, standard `60`, deep `90`.
+</ParamField>
+
 ## Optional Features
 
 <ParamField path="PERPLEXITY_API_KEY" type="string">
@@ -43,6 +63,30 @@ Configure Strix using environment variables or a config file.
 
 <ParamField path="STRIX_DISABLE_BROWSER" default="false" type="boolean">
   Disable browser automation tools.
+</ParamField>
+
+<ParamField path="STRIX_TOOL_RESULT_MAX_CHARS" default="6000" type="integer">
+  Maximum text size retained from each tool result before middle truncation.
+</ParamField>
+
+<ParamField path="STRIX_AGENT_INHERIT_RECENT_MESSAGES" default="6" type="integer">
+  Number of recent parent messages inherited by child agents.
+</ParamField>
+
+<ParamField path="STRIX_AGENT_INHERIT_MAX_CHARS" default="2000" type="integer">
+  Per-message character cap for inherited parent context.
+</ParamField>
+
+<ParamField path="STRIX_TRACE_MEMORY_EVENTS" default="800" type="integer">
+  Maximum recent chat/tool events retained in memory. Complete event history is still written to `events.jsonl`.
+</ParamField>
+
+<ParamField path="STRIX_CHECKPOINT_ENABLED" default="true" type="boolean">
+  Enable checkpoint writes to `strix_runs/<run_name>/checkpoint.json`.
+</ParamField>
+
+<ParamField path="STRIX_CHECKPOINT_INTERVAL" default="1" type="integer">
+  Save a checkpoint every N root-agent iterations.
 </ParamField>
 
 <ParamField path="STRIX_TELEMETRY" default="1" type="string">

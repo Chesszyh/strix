@@ -71,6 +71,88 @@ def test_create_agent_inherits_parent_whitebox_flag(monkeypatch) -> None:
     assert "mandatory" not in child_task.lower()
 
 
+def test_create_agent_bounds_inherited_parent_context(monkeypatch) -> None:
+    monkeypatch.setenv("STRIX_LLM", "openai/gpt-5")
+    monkeypatch.setenv("STRIX_AGENT_INHERIT_RECENT_MESSAGES", "3")
+    monkeypatch.setenv("STRIX_AGENT_INHERIT_MAX_CHARS", "40")
+
+    _reset_agent_graph_state()
+
+    parent_id = "parent-agent"
+    parent_llm = LLMConfig(timeout=123, scan_mode="standard", is_whitebox=False)
+    agents_graph_actions._agent_instances[parent_id] = SimpleNamespace(llm_config=parent_llm)
+
+    captured_thread_args: dict[str, object] = {}
+
+    class FakeStrixAgent:
+        def __init__(self, config: dict[str, object]):
+            self.config = config
+
+    class FakeThread:
+        def __init__(self, target, args, daemon, name):
+            captured_thread_args["args"] = args
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+            self.name = name
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(agents_module, "StrixAgent", FakeStrixAgent)
+    monkeypatch.setattr(agents_graph_actions.threading, "Thread", FakeThread)
+
+    history = [
+        {"role": "user", "content": f"message {idx} " + ("x" * 100)}
+        for idx in range(10)
+    ]
+    agent_state = SimpleNamespace(
+        agent_id=parent_id,
+        get_conversation_history=lambda: history,
+    )
+
+    result = agents_graph_actions.create_agent(
+        agent_state=agent_state,
+        task="bounded child task",
+        name="BoundedChild",
+        inherit_context=True,
+    )
+
+    assert result["success"] is True
+    inherited_messages = captured_thread_args["args"][2]
+    assert len(inherited_messages) == 4
+    assert inherited_messages[0]["content"].startswith("<parent_context_summary")
+    assert [msg["content"].split()[1] for msg in inherited_messages[1:]] == ["7", "8", "9"]
+    assert all(len(msg["content"]) <= 80 for msg in inherited_messages[1:])
+
+
+def test_finalize_agent_releases_completed_state_and_message_queue() -> None:
+    _reset_agent_graph_state()
+
+    class DummyStats:
+        input_tokens = 10
+        output_tokens = 5
+        cached_tokens = 2
+        cost = 0.25
+        requests = 1
+
+    child_id = "child-cleanup"
+    agent = SimpleNamespace(llm=SimpleNamespace(_total_stats=DummyStats()))
+    state = SimpleNamespace(messages=[{"role": "user", "content": "large"}])
+
+    agents_graph_actions._agent_graph["nodes"][child_id] = {"name": "Child", "status": "running"}
+    agents_graph_actions._agent_instances[child_id] = agent
+    agents_graph_actions._agent_states[child_id] = state
+    agents_graph_actions._agent_messages[child_id] = [{"content": "queued"}]
+
+    agents_graph_actions._finalize_agent_llm_stats(child_id, agent)
+
+    assert child_id not in agents_graph_actions._agent_instances
+    assert child_id not in agents_graph_actions._agent_states
+    assert child_id not in agents_graph_actions._agent_messages
+    assert agents_graph_actions._agent_graph["nodes"][child_id]["llm_stats"]["input_tokens"] == 10
+
+
 def test_delegation_prompt_includes_wiki_memory_instruction_in_whitebox(monkeypatch) -> None:
     monkeypatch.setenv("STRIX_LLM", "openai/gpt-5")
 
@@ -169,7 +251,10 @@ def test_agent_finish_appends_wiki_update_for_whitebox(monkeypatch) -> None:
 
     monkeypatch.setattr("strix.tools.notes.notes_actions.list_notes", fake_list_notes)
     monkeypatch.setattr("strix.tools.notes.notes_actions.get_note", fake_get_note)
-    monkeypatch.setattr("strix.tools.notes.notes_actions.append_note_content", fake_append_note_content)
+    monkeypatch.setattr(
+        "strix.tools.notes.notes_actions.append_note_content",
+        fake_append_note_content,
+    )
 
     state = SimpleNamespace(agent_id=child_id, parent_id=parent_id)
     result = agents_graph_actions.agent_finish(
